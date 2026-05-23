@@ -1,0 +1,11 @@
+@BackendApi_HostAddress = http://localhost:5125
+
+GET {{BackendApi_HostAddress}}/api/page/your-page-id
+Accept: application/json
+
+###
+
+GET {{BackendApi_HostAddress}}/api/page/your-page-id/posts
+Accept: application/json
+
+###
