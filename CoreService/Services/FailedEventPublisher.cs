@@ -54,7 +54,7 @@ namespace CoreService.Services
                 }, ct);
 
             _logger.LogWarning(
-                "Event published to send_failed. EventId={EventId} Reason={Reason}",
+                "[RETRY] Published to send_failed. EventId={EventId} Reason={Reason}",
                 evt.EventId, reason);
         }
 

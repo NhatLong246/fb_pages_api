@@ -14,6 +14,10 @@ builder.Services.AddSwaggerGen();
 
 builder.Services.Configure<FacebookClientOptions>(
     builder.Configuration.GetSection("Facebook"));
+builder.Services.Configure<RateLimitOptions>(
+    builder.Configuration.GetSection("RateLimit"));
+builder.Services.Configure<CircuitBreakerOptions>(
+    builder.Configuration.GetSection("CircuitBreaker"));
 
 builder.Services.AddHttpClient<IFacebookApiClient, FacebookApiClient>(client =>
 {
@@ -28,11 +32,18 @@ builder.Services.AddDbContext<CoreDbContext>(opts =>
 
 builder.Services.AddHttpClient("gemini", c =>
 {
-    c.DefaultRequestHeaders.Add("x-goog-api-key",
-        builder.Configuration["Gemini:ApiKey"]);
+    c.BaseAddress = new Uri("https://generativelanguage.googleapis.com/v1beta/");
+
+    var apiKey = builder.Configuration["Gemini:ApiKey"];
+    if (!string.IsNullOrWhiteSpace(apiKey))
+    {
+        c.DefaultRequestHeaders.Add("x-goog-api-key", apiKey);
+    }
 });
 
 builder.Services.AddSingleton<SpamDetector>();
+builder.Services.AddScoped<RateLimitService>();
+builder.Services.AddSingleton<FacebookApiCircuitBreaker>();
 builder.Services.AddScoped<AiAnalyzer>();
 builder.Services.AddScoped<DecisionEngine>();
 builder.Services.AddScoped<ActionExecutor>();

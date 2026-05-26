@@ -1,5 +1,7 @@
-using CoreService.Models;
+ï»¿using CoreService.Models;
 using Microsoft.Extensions.Options;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace CoreService.Services
@@ -9,6 +11,7 @@ namespace CoreService.Services
         private readonly HttpClient _http;
         private readonly FacebookClientOptions _opts;
         private readonly ILogger<FacebookApiClient> _logger;
+        private readonly FacebookApiCircuitBreaker _circuitBreaker;
 
         private static readonly JsonSerializerOptions JsonOpts = new()
         {
@@ -18,14 +21,14 @@ namespace CoreService.Services
         public FacebookApiClient(
             HttpClient http,
             IOptionsSnapshot<FacebookClientOptions> opts,
-            ILogger<FacebookApiClient> logger)
+            ILogger<FacebookApiClient> logger,
+            FacebookApiCircuitBreaker circuitBreaker)
         {
             _http = http;
             _opts = opts.Value;
             _logger = logger;
+            _circuitBreaker = circuitBreaker;
         }
-
-        // -- Hide / Unhide ----------------------------------------------------
 
         public Task<bool> HideCommentAsync(string commentId, CancellationToken ct = default)
             => SetCommentHiddenAsync(commentId, hidden: true, ct);
@@ -36,104 +39,133 @@ namespace CoreService.Services
         private async Task<bool> SetCommentHiddenAsync(
             string commentId, bool hidden, CancellationToken ct)
         {
-            // POST /{comment-id}?access_token=...
-            // body: { "is_hidden": true/false }
-            var token = EncodeToken();
-            var url = $"{commentId}?access_token={token}";
-
             var body = new { is_hidden = hidden };
-            var response = await _http.PostAsJsonAsync(url, body, ct);
+            using var request = CreateRequest(HttpMethod.Post, commentId, body);
+            using var response = await SendWithCircuitAsync(request, ct);
 
             if (!response.IsSuccessStatusCode)
             {
                 var ex = await BuildException(response);
+                _circuitBreaker.RecordFailure(ex);
                 _logger.LogError(ex,
-                    "HideComment failed. CommentId={CommentId} Hidden={Hidden}",
-                    commentId, hidden);
+                    "[ACTION] HideComment failed. CommentId={CommentId} Hidden={Hidden} Status={StatusCode}",
+                    commentId, hidden, (int)response.StatusCode);
                 throw ex;
             }
 
             _logger.LogInformation(
-                "Comment {Action}. CommentId={CommentId}",
-                hidden ? "hidden" : "unhidden", commentId);
+                "[ACTION] {Action}. CommentId={CommentId}",
+                hidden ? "HideComment succeeded" : "UnhideComment succeeded",
+                commentId);
 
             return true;
         }
 
-        // -- Delete Comment ---------------------------------------------------
-
         public async Task<bool> DeleteCommentAsync(string commentId, CancellationToken ct = default)
         {
-            var token = EncodeToken();
-            var url = $"{commentId}?access_token={token}";
-
-            var response = await _http.DeleteAsync(url, ct);
+            using var request = CreateRequest(HttpMethod.Delete, commentId);
+            using var response = await SendWithCircuitAsync(request, ct);
 
             if (!response.IsSuccessStatusCode)
             {
                 var ex = await BuildException(response);
+                _circuitBreaker.RecordFailure(ex);
                 _logger.LogError(ex,
-                    "DeleteComment failed. CommentId={CommentId}", commentId);
+                    "[ACTION] DeleteComment failed. CommentId={CommentId} Status={StatusCode}",
+                    commentId, (int)response.StatusCode);
                 throw ex;
             }
 
-            _logger.LogInformation("Comment deleted. CommentId={CommentId}", commentId);
+            _logger.LogInformation("[ACTION] DeleteComment succeeded. CommentId={CommentId}", commentId);
             return true;
         }
-
-        // -- Block / Unblock User ---------------------------------------------
 
         public async Task<bool> BlockUserAsync(
             string pageId, string userId, CancellationToken ct = default)
         {
-            // POST /{page-id}/blocked?access_token=...
-            // body: { "user": "<userId>" }
-            // Yêu c?u quy?n: pages_manage_engagement ho?c MODERATE
-            var token = EncodeToken();
-            var url = $"{pageId}/blocked?access_token={token}";
-
             var body = new { user = userId };
-            var response = await _http.PostAsJsonAsync(url, body, ct);
+            using var request = CreateRequest(HttpMethod.Post, $"{pageId}/blocked", body);
+            using var response = await SendWithCircuitAsync(request, ct);
 
             if (!response.IsSuccessStatusCode)
             {
                 var ex = await BuildException(response);
+                _circuitBreaker.RecordFailure(ex);
                 _logger.LogError(ex,
-                    "BlockUser failed. PageId={PageId} UserId={UserId}", pageId, userId);
+                    "[ACTION] BlockUser failed. PageId={PageId} UserId={UserId} Status={StatusCode}",
+                    pageId, userId, (int)response.StatusCode);
                 throw ex;
             }
 
             _logger.LogWarning(
-                "User blocked from page. PageId={PageId} UserId={UserId}", pageId, userId);
+                "[ACTION] BlockUser succeeded. PageId={PageId} UserId={UserId}",
+                pageId, userId);
             return true;
         }
 
         public async Task<bool> UnblockUserAsync(
             string pageId, string userId, CancellationToken ct = default)
         {
-            // DELETE /{page-id}/blocked?uid=<userId>&access_token=...
-            var token = EncodeToken();
-            var url = $"{pageId}/blocked?uid={userId}&access_token={token}";
-
-            var response = await _http.DeleteAsync(url, ct);
+            using var request = CreateRequest(HttpMethod.Delete, $"{pageId}/blocked?uid={userId}");
+            using var response = await SendWithCircuitAsync(request, ct);
 
             if (!response.IsSuccessStatusCode)
             {
                 var ex = await BuildException(response);
+                _circuitBreaker.RecordFailure(ex);
                 _logger.LogError(ex,
-                    "UnblockUser failed. PageId={PageId} UserId={UserId}", pageId, userId);
+                    "[ACTION] UnblockUser failed. PageId={PageId} UserId={UserId} Status={StatusCode}",
+                    pageId, userId, (int)response.StatusCode);
                 throw ex;
             }
 
             _logger.LogInformation(
-                "User unblocked. PageId={PageId} UserId={UserId}", pageId, userId);
+                "[ACTION] UnblockUser succeeded. PageId={PageId} UserId={UserId}",
+                pageId, userId);
             return true;
         }
 
-        // -- Helpers ----------------------------------------------------------
+        private HttpRequestMessage CreateRequest(HttpMethod method, string url, object? body = null)
+        {
+            var request = new HttpRequestMessage(method, url);
 
-        private string EncodeToken()
-            => System.Net.WebUtility.UrlEncode(_opts.PageAccessToken);
+            if (!string.IsNullOrWhiteSpace(_opts.PageAccessToken))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue(
+                    "Bearer",
+                    _opts.PageAccessToken);
+            }
+
+            if (body is not null)
+            {
+                request.Content = JsonContent.Create(body);
+            }
+
+            return request;
+        }
+
+        private async Task<HttpResponseMessage> SendWithCircuitAsync(
+            HttpRequestMessage request,
+            CancellationToken ct)
+        {
+            _circuitBreaker.ThrowIfOpen();
+
+            try
+            {
+                var response = await _http.SendAsync(request, ct);
+                if (response.IsSuccessStatusCode)
+                {
+                    _circuitBreaker.RecordSuccess();
+                }
+
+                return response;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _circuitBreaker.RecordFailure(ex);
+                throw;
+            }
+        }
 
         private static async Task<FacebookApiCallException> BuildException(
             HttpResponseMessage response)
@@ -146,7 +178,10 @@ namespace CoreService.Services
                 var envelope = JsonSerializer.Deserialize<FbErrorEnvelope>(raw, JsonOpts);
                 err = envelope?.Error;
             }
-            catch { /* ignore parse failure */ }
+            catch
+            {
+                // Keep the raw body when Facebook returns a non-standard error.
+            }
 
             var msg = err?.Message ?? raw;
             return new FacebookApiCallException(

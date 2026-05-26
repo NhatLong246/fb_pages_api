@@ -1,4 +1,4 @@
-using Confluent.Kafka;
+Ôªøusing Confluent.Kafka;
 using CoreService.Data;
 using CoreService.Models;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +10,7 @@ namespace CoreService.Services
 {
     public class CoreEventConsumerService : BackgroundService
     {
-        // S? worker song song x? l˝ pipeline
+        // S? worker song song x? l√Ω pipeline
         // N?u AI call m?t ~2s, 5 workers = ~2-3 events/s throughput
         private const int WorkerCount = 5;
 
@@ -22,12 +22,12 @@ namespace CoreService.Services
         private readonly KafkaConsumerOptions _kafkaOpts;
         private readonly ILogger<CoreEventConsumerService> _logger;
 
-        // Channel trung gian gi?a Kafka thread v‡ worker threads
+        // Channel trung gian gi?a Kafka thread v√† worker threads
         // Item: (ConsumeResult d? commit sau, deserialized event)
         private Channel<ChannelItem> _channel = null!;
 
-        // Worker b·o offset d„ x? l˝ xong v‡o channel n‡y.
-        // Kafka consumer thread s? commit d? tr·nh g?i consumer t? nhi?u thread.
+        // Worker b√°o offset d√£ x? l√Ω xong v√†o channel n√†y.
+        // Kafka consumer thread s? commit d? tr√°nh g?i consumer t? nhi?u thread.
         private Channel<TopicPartitionOffset> _commitChannel = null!;
 
         public CoreEventConsumerService(
@@ -45,7 +45,7 @@ namespace CoreService.Services
             if (!IsConfigValid())
             {
                 _logger.LogWarning(
-                    "CoreEventConsumerService disabled ó Kafka config incomplete.");
+                    "CoreEventConsumerService disabled ‚Äî Kafka config incomplete.");
                 return;
             }
 
@@ -75,8 +75,8 @@ namespace CoreService.Services
         }
 
         // -- Kafka Producer Loop -----------------------------------------------
-        // Ch? l‡m 1 vi?c: d?c t? Kafka ? ghi v‡o channel
-        // KhÙng x? l˝ gÏ thÍm ? khÙng bao gi? b? slow
+        // Ch? l√†m 1 vi?c: d?c t? Kafka ? ghi v√†o channel
+        // Kh√¥ng x? l√Ω g√¨ th√™m ? kh√¥ng bao gi? b? slow
 
         private async Task KafkaProducerLoop(CancellationToken ct)
         {
@@ -90,7 +90,7 @@ namespace CoreService.Services
             var commitStates = new Dictionary<TopicPartition, PartitionCommitState>();
 
             _logger.LogInformation(
-                "Kafka consumer started. Topics={Topics} GroupId={GroupId} Workers={Workers}",
+                "[CORE] Kafka consumer started. Topics={Topics} GroupId={GroupId} Workers={Workers}",
                 string.Join(",", topics), _kafkaOpts.GroupId, WorkerCount);
 
             try
@@ -103,18 +103,18 @@ namespace CoreService.Services
 
                     try
                     {
-                        // Consume v?i timeout ng?n d? ki?m tra CT thu?ng xuyÍn
+                        // Consume v?i timeout ng?n d? ki?m tra CT thu?ng xuy√™n
                         result = consumer.Consume(TimeSpan.FromMilliseconds(500));
                     }
                     catch (ConsumeException ex)
                     {
-                        _logger.LogError(ex, "Kafka consume error ó continuing.");
+                        _logger.LogError(ex, "Kafka consume error ‚Äî continuing.");
                         continue;
                     }
 
                     if (result?.Message?.Value is null) continue;
 
-                    // Deserialize ngay t?i d‚y d? skip message l?i s?m
+                    // Deserialize ngay t?i d√¢y d? skip message l?i s?m
                     NormalizedFacebookEvent? evt;
                     try
                     {
@@ -127,7 +127,7 @@ namespace CoreService.Services
                         _logger.LogWarning(ex,
                             "Skipping malformed message at {Offset}.",
                             result.TopicPartitionOffset);
-                        consumer.Commit(result); // commit d? khÙng stuck
+                        consumer.Commit(result); // commit d? kh√¥ng stuck
                         continue;
                     }
 
@@ -142,8 +142,8 @@ namespace CoreService.Services
 
                     EnsureCommitState(commitStates, result.TopicPartition, result.Offset.Value);
 
-                    // Ghi v‡o channel ó await s? block n?u channel d?y (back-pressure)
-                    // –i?u n‡y ?n: Kafka consumer ch?, KH‘NG m?t event
+                    // Ghi v√†o channel ‚Äî await s? block n?u channel d?y (back-pressure)
+                    // √êi?u n√†y ?n: Kafka consumer ch?, KH√îNG m?t event
                     await _channel.Writer.WriteAsync(new ChannelItem(result, evt), ct);
                 }
             }
@@ -176,7 +176,7 @@ namespace CoreService.Services
             _logger.LogInformation("Worker {WorkerId} stopped.", workerId);
         }
 
-        // -- Pipeline chÌnh ---------------------------------------------------
+        // -- Pipeline ch√≠nh ---------------------------------------------------
 
         private async Task ProcessWithStateTrackingAsync(
             ConsumeResult<string, string> kafkaResult,
@@ -188,13 +188,14 @@ namespace CoreService.Services
             var sp = scope.ServiceProvider;
 
             var db = sp.GetRequiredService<CoreDbContext>();
+            var rateLimitService = sp.GetRequiredService<RateLimitService>();
             var spamDetector = sp.GetRequiredService<SpamDetector>();
             var aiAnalyzer = sp.GetRequiredService<AiAnalyzer>();
             var decisionEngine = sp.GetRequiredService<DecisionEngine>();
             var actionExecutor = sp.GetRequiredService<ActionExecutor>();
             var failedPublisher = sp.GetRequiredService<IFailedEventPublisher>();
 
-            // -- Ch?ng x? l˝ tr˘ng (idempotency) -----------------------------
+            // -- Ch?ng x? l√Ω tr√πng (idempotency) -----------------------------
             var existing = await db.EventStates
                 .AsNoTracking()
                 .FirstOrDefaultAsync(e => e.EventId == evt.EventId, ct);
@@ -220,6 +221,53 @@ namespace CoreService.Services
             state.Status = ProcessingStatus.Processing;
             state.UpdatedAt = DateTimeOffset.UtcNow;
 
+            var shouldReuseDecision = existing is not null
+                && existing.RetryCount > 0
+                && existing.ActionTaken != DecisionAction.None;
+
+            if (!shouldReuseDecision)
+            {
+                var rateLimit = await rateLimitService.CheckAsync(evt, ct);
+                if (rateLimit.IsLimited)
+                {
+                    state.IsSpam = false;
+                    state.SpamSeverity = SpamSeverity.None;
+                    state.Intent = "pending_review";
+                    state.Sentiment = "neutral";
+                    state.ActionTaken = DecisionAction.QueueForReview;
+                    state.DecisionReason = rateLimit.Reason;
+                    state.Status = ProcessingStatus.Processed;
+                    state.ProcessedAt = DateTimeOffset.UtcNow;
+                    state.UpdatedAt = DateTimeOffset.UtcNow;
+
+                    await EnqueueReviewAsync(db, evt, "rate_limit_exceeded", ct);
+
+                    if (existing is null)
+                        db.EventStates.Add(state);
+                    else
+                        db.EventStates.Update(state);
+
+                    await db.SaveChangesAsync(ct);
+
+                    _logger.LogWarning(
+                        "[RATE_LIMIT] Exceeded. EventId={EventId} ActorId={ActorId} Count={Count}/{Limit} WindowSeconds={WindowSeconds}",
+                        evt.EventId,
+                        evt.ActorId,
+                        rateLimit.CurrentCount,
+                        rateLimit.Limit,
+                        rateLimit.WindowSeconds);
+                    _logger.LogInformation(
+                        "[EVENT] Processed. Worker={WorkerId} EventId={EventId} Action={Action} Status={Status}",
+                        workerId,
+                        evt.EventId,
+                        state.ActionTaken,
+                        state.Status);
+
+                    CommitOffset(kafkaResult);
+                    return;
+                }
+            }
+
             if (existing is null)
                 db.EventStates.Add(state);
             else
@@ -228,16 +276,12 @@ namespace CoreService.Services
             await db.SaveChangesAsync(ct);
 
             _logger.LogInformation(
-                "[W{WorkerId}] Processing EventId={EventId} CommentId={CommentId}",
-                workerId, evt.EventId, evt.CommentId);
+                "[EVENT] Received. Worker={WorkerId} EventId={EventId} CommentId={CommentId} ActorId={ActorId} Message=\"{Message}\"",
+                workerId, evt.EventId, evt.CommentId, evt.ActorId, Summarize(evt.Message));
 
             try
             {
                 DecisionResult decision;
-                var shouldReuseDecision = existing is not null
-                    && existing.RetryCount > 0
-                    && existing.ActionTaken != DecisionAction.None;
-
                 if (shouldReuseDecision)
                 {
                     decision = new DecisionResult
@@ -255,7 +299,14 @@ namespace CoreService.Services
                     // -- Step 1: Spam Detection -----------------------------
                     var spamResult = spamDetector.Analyze(evt.Message);
 
-                    // -- Step 2: AI Analysis (ch? g?i n?u chua ch?c l‡ spam) -
+                    _logger.LogInformation(
+                        "[SPAM] Result. EventId={EventId} IsSpam={IsSpam} Severity={Severity} Reason={Reason}",
+                        evt.EventId,
+                        spamResult.IsSpam,
+                        spamResult.Severity,
+                        spamResult.Reason ?? "-");
+
+                    // -- Step 2: AI Analysis (ch? g?i n?u chua ch?c l√† spam) -
                     AiAnalysisResult aiResult;
                     if (spamResult.Severity == SpamSeverity.Harmful)
                     {
@@ -266,12 +317,25 @@ namespace CoreService.Services
                         aiResult = await aiAnalyzer.AnalyzeAsync(evt.Message, ct);
                     }
 
+                    _logger.LogInformation(
+                        "[AI] Result. EventId={EventId} Intent={Intent} Sentiment={Sentiment} Confidence={Confidence:0.00}",
+                        evt.EventId,
+                        aiResult.Intent,
+                        aiResult.Sentiment,
+                        aiResult.Confidence);
+
                     // -- Step 3: Decision -----------------------------------
                     decision = await decisionEngine.DecideAsync(
                         evt, spamResult, aiResult, ct);
                 }
 
-                // C?p nh?t state v?i k?t qu? ph‚n tÌch
+                _logger.LogInformation(
+                    "[DECISION] EventId={EventId} Action={Action} Reason=\"{Reason}\"",
+                    evt.EventId,
+                    decision.Action,
+                    decision.Reason ?? "-");
+
+                // C?p nh?t state v?i k?t qu? ph√¢n t√≠ch
                 state.IsSpam = decision.IsSpam;
                 state.SpamSeverity = decision.SpamSeverity;
                 state.Intent = decision.Intent;
@@ -282,35 +346,35 @@ namespace CoreService.Services
                 // -- Step 4: Execute Action ---------------------------------
                 await actionExecutor.ExecuteAsync(evt, decision.Action, ct);
 
-                // -- Ho‡n th‡nh ---------------------------------------------
+                // -- Ho√†n th√†nh ---------------------------------------------
                 state.Status = ProcessingStatus.Processed;
                 state.ProcessedAt = DateTimeOffset.UtcNow;
                 state.UpdatedAt = DateTimeOffset.UtcNow;
                 await db.SaveChangesAsync(ct);
 
                 _logger.LogInformation(
-                    "[W{WorkerId}] Processed EventId={EventId} Action={Action}",
-                    workerId, evt.EventId, decision.Action);
+                    "[EVENT] Processed. Worker={WorkerId} EventId={EventId} Action={Action} Status={Status}",
+                    workerId, evt.EventId, decision.Action, state.Status);
 
                 // -- Commit offset Kafka ------------------------------------
                 CommitOffset(kafkaResult);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Shutdown graceful ó khÙng commit, event s? du?c reprocess
+                // Shutdown graceful ‚Äî kh√¥ng commit, event s? du?c reprocess
                 _logger.LogWarning(
-                    "Processing cancelled for EventId={EventId} ó will reprocess.",
+                    "Processing cancelled for EventId={EventId} ‚Äî will reprocess.",
                     evt.EventId);
 
                 state.Status = ProcessingStatus.Received; // reset v? Received
                 state.UpdatedAt = DateTimeOffset.UtcNow;
-                await db.SaveChangesAsync(CancellationToken.None); // d˘ng None vÏ CT d„ cancel
+                await db.SaveChangesAsync(CancellationToken.None); // d√πng None v√¨ CT d√£ cancel
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "[W{WorkerId}] Failed EventId={EventId}. Attempt={Attempt}",
-                    workerId, evt.EventId, state.RetryCount + 1);
+                    "[EVENT] Failed. Worker={WorkerId} EventId={EventId} Attempt={Attempt} Error=\"{Error}\"",
+                    workerId, evt.EventId, state.RetryCount + 1, ex.Message);
 
                 state.Status = ProcessingStatus.Failed;
                 state.ErrorMessage = ex.Message;
@@ -327,7 +391,7 @@ namespace CoreService.Services
                         "Failed to save error state for EventId={EventId}.", evt.EventId);
                 }
 
-                // Publish sang topic send_failed d? Retry Service x? l˝
+                // Publish sang topic send_failed d? Retry Service x? l√Ω
                 try
                 {
                     await failedPublisher.PublishAsync(evt, ex.Message, CancellationToken.None);
@@ -338,14 +402,14 @@ namespace CoreService.Services
                         "Also failed to publish to send_failed. EventId={EventId}.", evt.EventId);
                 }
 
-                // V?n commit offset d? khÙng block partition
-                // Event d„ du?c publish sang send_failed d? retry riÍng
+                // V?n commit offset d? kh√¥ng block partition
+                // Event d√£ du?c publish sang send_failed d? retry ri√™ng
                 CommitOffset(kafkaResult);
             }
         }
 
         // -- Commit helpers ----------------------------------------------------
-        // Worker ch? b·o offset d„ xong. Kafka thread gom offset liÍn t?c r?i commit th?t.
+        // Worker ch? b√°o offset d√£ xong. Kafka thread gom offset li√™n t?c r?i commit th?t.
 
         private void CommitOffset(ConsumeResult<string, string> result)
         {
@@ -423,16 +487,46 @@ namespace CoreService.Services
             EnableAutoCommit = false,
             AutoOffsetReset = AutoOffsetReset.Earliest,
 
-            // –? th?i gian cho AI call (10s timeout ◊ MaxRetries = ~30s) + buffer
-            MaxPollIntervalMs = 120_000,    // 2 ph˙t
+            // √ê? th?i gian cho AI call (10s timeout √ó MaxRetries = ~30s) + buffer
+            MaxPollIntervalMs = 120_000,    // 2 ph√∫t
 
             // Session timeout ph?i < MaxPollIntervalMs
-            SessionTimeoutMs = 30_000,     // 30 gi‚y
+            SessionTimeoutMs = 30_000,     // 30 gi√¢y
 
-            // T?i uu throughput khi cÛ burst
+            // T?i uu throughput khi c√≥ burst
             FetchMinBytes = 1,
             FetchWaitMaxMs = 100,
         };
+
+        private static string Summarize(string? value, int maxLength = 120)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "-";
+
+            var compact = value.Replace("\r", " ").Replace("\n", " ").Trim();
+            return compact.Length <= maxLength
+                ? compact
+                : compact[..maxLength] + "...";
+        }
+
+        private static async Task EnqueueReviewAsync(
+            CoreDbContext db,
+            NormalizedFacebookEvent evt,
+            string reason,
+            CancellationToken ct)
+        {
+            var existingQueueItem = await db.ReviewQueueItems
+                .FindAsync([evt.EventId], ct);
+
+            if (existingQueueItem is not null) return;
+
+            db.ReviewQueueItems.Add(new ReviewQueueItem
+            {
+                EventId = evt.EventId,
+                CommentId = evt.CommentId ?? string.Empty,
+                Reason = reason,
+                QueuedAt = DateTimeOffset.UtcNow
+            });
+        }
 
         private bool IsConfigValid() =>
             !string.IsNullOrWhiteSpace(_kafkaOpts.BootstrapServers) &&

@@ -58,9 +58,10 @@ namespace CoreService.Services
             consumer.Subscribe(_options.FailedTopic);
 
             _logger.LogInformation(
-                "Failed event retry service started. FailedTopic={FailedTopic} RetryTopic={RetryTopic}",
+                "[RETRY] Service started. FailedTopic={FailedTopic} RetryTopic={RetryTopic} DeadLetterTopic={DeadLetterTopic}",
                 _options.FailedTopic,
-                _options.RetryTopic);
+                _options.RetryTopic,
+                _options.DeadLetterTopic);
 
             try
             {
@@ -129,16 +130,17 @@ namespace CoreService.Services
                 {
                     await PublishDeadLetterAsync(producer, result.Message.Key, result.Message.Value, eventId, retryCount, ct);
                     _logger.LogError(
-                        "Retry limit reached. EventId={EventId} RetryCount={RetryCount}",
+                        "[DLQ] Retry limit reached. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
                         eventId,
-                        retryCount);
+                        retryCount,
+                        _options.DeadLetterTopic);
                     consumer.Commit(result);
                     return;
                 }
 
                 var delay = TimeSpan.FromSeconds(Math.Pow(2, Math.Max(retryCount - 1, 0)));
                 _logger.LogWarning(
-                    "Retrying failed event after {DelaySeconds}s. EventId={EventId} RetryCount={RetryCount}",
+                    "[RETRY] Scheduled after {DelaySeconds}s. EventId={EventId} RetryCount={RetryCount}",
                     delay.TotalSeconds,
                     eventId,
                     retryCount);
@@ -156,9 +158,10 @@ namespace CoreService.Services
                 consumer.Commit(result);
 
                 _logger.LogWarning(
-                    "Republished failed event for retry. EventId={EventId} RetryCount={RetryCount}",
+                    "[RETRY] Republished. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
                     eventId,
-                    retryCount);
+                    retryCount,
+                    _options.RetryTopic);
             }
             catch (Exception ex)
             {
@@ -193,6 +196,12 @@ namespace CoreService.Services
                 }, ct);
 
             producer.Flush(TimeSpan.FromSeconds(5));
+
+            _logger.LogError(
+                "[DLQ] Published. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
+                eventId,
+                retryCount,
+                _options.DeadLetterTopic);
         }
 
         private bool IsConfigValid() =>

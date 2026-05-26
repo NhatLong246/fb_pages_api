@@ -26,6 +26,7 @@ namespace CoreService.Services
 
         private readonly HttpClient _httpClient;
         private readonly ILogger<AiAnalyzer> _logger;
+        private readonly string _model;
 
         private static readonly JsonSerializerOptions JsonOpts = new()
         {
@@ -34,10 +35,12 @@ namespace CoreService.Services
 
         public AiAnalyzer(
             IHttpClientFactory factory,
-            ILogger<AiAnalyzer> logger)
+            ILogger<AiAnalyzer> logger,
+            IConfiguration configuration)
         {
             _httpClient = factory.CreateClient("gemini");
             _logger = logger;
+            _model = configuration["Gemini:Model"] ?? "gemini-2.5-flash";
         }
 
         /// <summary>
@@ -162,7 +165,7 @@ namespace CoreService.Services
             };
 
             using var response = await _httpClient.PostAsJsonAsync(
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent", requestBody, ct);
+                $"models/{_model}:generateContent", requestBody, ct);
 
             // 429 Rate limit hoặc 5xx → throw để retry
             if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
