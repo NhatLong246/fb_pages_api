@@ -82,10 +82,7 @@ namespace CoreService.Services
         {
             var config = BuildConsumerConfig();
             using var consumer = new ConsumerBuilder<string, string>(config).Build();
-            var topics = new[] { _kafkaOpts.Topic, _kafkaOpts.RetryTopic }
-                .Where(topic => !string.IsNullOrWhiteSpace(topic))
-                .Distinct()
-                .ToArray();
+            var topics = new[] { _kafkaOpts.Topic };
             consumer.Subscribe(topics);
             var commitStates = new Dictionary<TopicPartition, PartitionCommitState>();
 
@@ -193,14 +190,13 @@ namespace CoreService.Services
             var aiAnalyzer = sp.GetRequiredService<AiAnalyzer>();
             var decisionEngine = sp.GetRequiredService<DecisionEngine>();
             var actionExecutor = sp.GetRequiredService<ActionExecutor>();
-            var failedPublisher = sp.GetRequiredService<IFailedEventPublisher>();
 
             // -- Ch?ng x? lý trùng (idempotency) -----------------------------
             var existing = await db.EventStates
                 .AsNoTracking()
                 .FirstOrDefaultAsync(e => e.EventId == evt.EventId, ct);
 
-            if (existing?.Status == ProcessingStatus.Processed)
+            if (existing?.Status is ProcessingStatus.Processed or ProcessingStatus.Replied)
             {
                 _logger.LogDebug(
                     "Duplicate event skipped. EventId={EventId}", evt.EventId);
@@ -391,19 +387,9 @@ namespace CoreService.Services
                         "Failed to save error state for EventId={EventId}.", evt.EventId);
                 }
 
-                // Publish sang topic send_failed d? Retry Service x? lý
-                try
-                {
-                    await failedPublisher.PublishAsync(evt, ex.Message, CancellationToken.None);
-                }
-                catch (Exception pubEx)
-                {
-                    _logger.LogError(pubEx,
-                        "Also failed to publish to send_failed. EventId={EventId}.", evt.EventId);
-                }
-
-                // V?n commit offset d? không block partition
-                // Event dã du?c publish sang send_failed d? retry riêng
+                // Commit malformed or internally failed events so one bad event does not
+                // block the raw_events partition. Facebook action retries are handled by
+                // BackendApi after commands are published.
                 CommitOffset(kafkaResult);
             }
         }
@@ -531,7 +517,7 @@ namespace CoreService.Services
         private bool IsConfigValid() =>
             !string.IsNullOrWhiteSpace(_kafkaOpts.BootstrapServers) &&
             !string.IsNullOrWhiteSpace(_kafkaOpts.Topic) &&
-            !string.IsNullOrWhiteSpace(_kafkaOpts.RetryTopic) &&
+            !string.IsNullOrWhiteSpace(_kafkaOpts.CommandTopic) &&
             !string.IsNullOrWhiteSpace(_kafkaOpts.GroupId);
     }
 

@@ -41,6 +41,8 @@ namespace CoreService.Models
         HideComment,
         BlacklistUser,
         QueueForReview,
-        BlockUser
+        BlockUser,
+        ReplyPositive,
+        ReplyNegative
     }
 }

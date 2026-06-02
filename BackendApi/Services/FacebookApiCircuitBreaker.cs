@@ -1,7 +1,7 @@
-using CoreService.Models;
+using BackendApi.Models;
 using Microsoft.Extensions.Options;
 
-namespace CoreService.Services
+namespace BackendApi.Services
 {
     public class FacebookApiCircuitBreaker
     {
@@ -24,15 +24,14 @@ namespace CoreService.Services
             lock (_gate)
             {
                 if (_openedUntil is null) return;
-
-                var now = DateTimeOffset.UtcNow;
-                if (now < _openedUntil.Value)
+                if (DateTimeOffset.UtcNow < _openedUntil.Value)
                 {
-                    throw new FacebookApiCircuitOpenException(_openedUntil.Value);
+                    throw new HttpRequestException(
+                        $"Facebook API circuit is open until {_openedUntil:O}");
                 }
 
                 _openedUntil = null;
-                _logger.LogWarning("[CIRCUIT] Facebook API circuit half-open. Next request is allowed.");
+                _logger.LogWarning("[CIRCUIT] Half-open. Allowing the next Facebook API request.");
             }
         }
 
@@ -40,11 +39,8 @@ namespace CoreService.Services
         {
             lock (_gate)
             {
-                if (_failureCount == 0 && _openedUntil is null) return;
-
                 _failureCount = 0;
                 _openedUntil = null;
-                _logger.LogInformation("[CIRCUIT] Facebook API circuit closed after successful request.");
             }
         }
 
@@ -53,11 +49,10 @@ namespace CoreService.Services
             lock (_gate)
             {
                 _failureCount++;
-
                 if (_failureCount < _options.FailureThreshold)
                 {
                     _logger.LogWarning(
-                        "[CIRCUIT] Facebook API failure recorded. Count={Count}/{Threshold} Error=\"{Error}\"",
+                        "[CIRCUIT] Failure recorded. Count={Count}/{Threshold} Error=\"{Error}\"",
                         _failureCount,
                         _options.FailureThreshold,
                         ex.Message);
@@ -66,21 +61,10 @@ namespace CoreService.Services
 
                 _openedUntil = DateTimeOffset.UtcNow.AddSeconds(_options.BreakSeconds);
                 _logger.LogError(
-                    "[CIRCUIT] Facebook API circuit opened for {BreakSeconds}s after {Count} consecutive failures.",
+                    "[CIRCUIT] Opened for {BreakSeconds}s after {Count} consecutive failures.",
                     _options.BreakSeconds,
                     _failureCount);
             }
-        }
-    }
-
-    public sealed class FacebookApiCircuitOpenException : Exception
-    {
-        public DateTimeOffset OpenedUntil { get; }
-
-        public FacebookApiCircuitOpenException(DateTimeOffset openedUntil)
-            : base($"Facebook API circuit is open until {openedUntil:O}")
-        {
-            OpenedUntil = openedUntil;
         }
     }
 }

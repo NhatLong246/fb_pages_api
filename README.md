@@ -112,3 +112,39 @@ Người dùng có thể truy cập Kafka UI tại `http://localhost:8080` để
 - **HTTPS Requirement**: Meta yêu cầu bắt buộc sử dụng giao thức HTTPS cho Callback URL.
 - **Latency**: Do sử dụng Kafka, dữ liệu có thể có độ trễ nhỏ tùy thuộc vào cấu hình của Consumer.
 - **Scaling**: WebhookService được thiết kế độc lập, cho phép mở rộng quy mô (Scale-out) dễ dàng khi lưu lượng sự kiện tăng cao.
+
+## 9. Independent Application Services
+
+Run the four application services in separate terminals:
+
+```powershell
+dotnet run --project WebhookService\WebhookService.csproj --launch-profile webhook-service
+dotnet run --project CoreService\CoreService.csproj --launch-profile core-service
+dotnet run --project BackendApi\BackendApi.csproj --launch-profile backend-api
+dotnet run --project RetryService\RetryService.csproj --launch-profile retry-service
+```
+
+- **WebhookService** receives and normalizes Facebook webhook events.
+- **CoreService** classifies sentiment, moderates spam, and publishes `reply_commands`.
+- **BackendApi** consumes action commands, enforces idempotency, calls Facebook Graph API, and exposes dashboard REST endpoints.
+- **RetryService** retries failed commands with exponential backoff and publishes exhausted messages to `dead_letter`.
+
+## 10. Monitoring And Slack Alerts
+
+Docker Compose also starts:
+
+- Kafka exporter: `http://localhost:9308/metrics`
+- Prometheus: `http://localhost:9090`
+- Alertmanager: `http://localhost:9093`
+
+To enable Slack notifications, create a local `.env` file from `.env.example` and replace the placeholder with your Incoming Webhook URL. The local `.env` file is ignored by Git.
+
+To protect dashboard REST endpoints, set `Dashboard:AdminApiKey` in the local `BackendApi/appsettings.Development.json` file and send the value through the `X-Admin-Key` request header.
+
+## 11. Kafka Action Flow
+
+```text
+Facebook -> WebhookService -> raw_events -> CoreService -> reply_commands
+-> BackendApi -> send_failed -> RetryService -> send_retry
+-> BackendApi -> dead_letter -> Prometheus -> Alertmanager -> Slack
+```

@@ -11,5 +11,8 @@ namespace BackendApi.Services
         Task<object?> GetCommentsAsync(string postId);
         Task<object?> GetLikesAsync(string postId);
         Task<object?> GetInsightsAsync(string pageId);
+        Task HideCommentAsync(string commentId, CancellationToken ct);
+        Task ReplyToCommentAsync(string commentId, string message, CancellationToken ct);
+        Task BlockUserAsync(string pageId, string userId, CancellationToken ct);
     }
 }

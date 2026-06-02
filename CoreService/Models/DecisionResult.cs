@@ -11,10 +11,25 @@ namespace CoreService.Models
         public bool IsSpam { get; init; }
         public SpamSeverity SpamSeverity { get; init; }
 
-        public static DecisionResult NoAction(AiAnalysisResult ai) => new()
+        public static DecisionResult NoAction(
+            AiAnalysisResult ai,
+            string? reason = null) => new()
         {
             Action = DecisionAction.None,
-            Reason = null,
+            Reason = reason,
+            Intent = ai.Intent,
+            Sentiment = ai.Sentiment,
+            IsSpam = false,
+            SpamSeverity = SpamSeverity.None
+        };
+
+        public static DecisionResult Automation(
+            DecisionAction action,
+            AiAnalysisResult ai,
+            string reason) => new()
+        {
+            Action = action,
+            Reason = reason,
             Intent = ai.Intent,
             Sentiment = ai.Sentiment,
             IsSpam = false,

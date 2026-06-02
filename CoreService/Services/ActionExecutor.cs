@@ -5,14 +5,20 @@ namespace CoreService.Services
 {
     public class ActionExecutor
     {
-        private readonly IFacebookApiClient _fb;
+        private const string PositiveReply =
+            "Cam on ban da ung ho shop!";
+
+        private const string NegativeReply =
+            "Rat xin loi vi trai nghiem chua tot. Shop se kiem tra va ho tro ban ngay.";
+
+        private readonly IFacebookActionCommandPublisher _publisher;
         private readonly CoreDbContext _db;
         private readonly ILogger<ActionExecutor> _logger;
 
-        public ActionExecutor(IFacebookApiClient fb, CoreDbContext db,
+        public ActionExecutor(IFacebookActionCommandPublisher publisher, CoreDbContext db,
             ILogger<ActionExecutor> logger)
         {
-            _fb = fb; _db = db; _logger = logger;
+            _publisher = publisher; _db = db; _logger = logger;
         }
 
         public async Task ExecuteAsync(
@@ -23,20 +29,18 @@ namespace CoreService.Services
             switch (action)
             { 
                 case DecisionAction.HideComment:
-                    await _fb.HideCommentAsync(evt.CommentId!, ct);
-                    _logger.LogInformation("Hidden comment {CommentId}", evt.CommentId);
+                    await PublishAsync(evt, action, null, ct);
                     break;
 
                 case DecisionAction.BlacklistUser:
                     await AddToBlacklistAsync(evt, ct);
-                    await _fb.HideCommentAsync(evt.CommentId!, ct);
+                    await PublishAsync(evt, DecisionAction.HideComment, null, ct);
                     _logger.LogWarning("Blacklisted user {ActorId}", evt.ActorId);
                     break;
 
                 case DecisionAction.QueueForReview:
                     await EnqueueReviewAsync(evt, "harmful_or_scam", ct);
-
-                    await _fb.HideCommentAsync(evt.CommentId!, ct);
+                    await PublishAsync(evt, DecisionAction.HideComment, null, ct);
                     break;
 
                 case DecisionAction.BlockUser:
@@ -51,28 +55,39 @@ namespace CoreService.Services
 
                     await EnqueueReviewAsync(evt, "manual_block_required", ct);
 
-                    try
-                    {
-                        await _fb.BlockUserAsync(evt.PageId, evt.ActorId, ct);
-                        await MarkBlockedAsync(evt, ct);
-                        _logger.LogWarning(
-                            "Blocked user {ActorId} from page {PageId}",
-                            evt.ActorId,
-                            evt.PageId);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(
-                            ex,
-                            "BlockUser API failed for ActorId={ActorId}. Queued for manual block.",
-                            evt.ActorId);
-                    }
+                    await PublishAsync(evt, action, null, ct);
+                    break;
+
+                case DecisionAction.ReplyPositive:
+                    await PublishAsync(evt, action, PositiveReply, ct);
+                    break;
+
+                case DecisionAction.ReplyNegative:
+                    await PublishAsync(evt, action, NegativeReply, ct);
                     break;
 
                 case DecisionAction.None:
                     _logger.LogDebug("No action for EventId={EventId}", evt.EventId);
                     break;
             }
+        }
+
+        private Task PublishAsync(
+            NormalizedFacebookEvent evt,
+            DecisionAction action,
+            string? message,
+            CancellationToken ct)
+        {
+            return _publisher.PublishAsync(new FacebookActionCommand
+            {
+                CommandId = $"{evt.EventId}:{action}",
+                EventId = evt.EventId,
+                Action = action,
+                PageId = evt.PageId,
+                CommentId = evt.CommentId,
+                ActorId = evt.ActorId,
+                Message = message
+            }, ct);
         }
 
         private async Task AddToBlacklistAsync(
@@ -95,33 +110,6 @@ namespace CoreService.Services
             else
             {
                 user.SpamCount++;
-                user.LastSpamAt = DateTimeOffset.UtcNow;
-            }
-
-            await _db.SaveChangesAsync(ct);
-        }
-
-        private async Task MarkBlockedAsync(
-            NormalizedFacebookEvent evt, CancellationToken ct)
-        {
-            var user = await _db.BlacklistedUsers
-                .FindAsync([evt.ActorId!, evt.PageId], ct);
-
-            if (user is null)
-            {
-                _db.BlacklistedUsers.Add(new BlacklistedUser
-                {
-                    UserId = evt.ActorId!,
-                    PageId = evt.PageId,
-                    SpamCount = 1,
-                    FirstSpamAt = DateTimeOffset.UtcNow,
-                    LastSpamAt = DateTimeOffset.UtcNow,
-                    IsBlocked = true
-                });
-            }
-            else
-            {
-                user.IsBlocked = true;
                 user.LastSpamAt = DateTimeOffset.UtcNow;
             }
 

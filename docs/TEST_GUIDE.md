@@ -9,13 +9,15 @@ Tai lieu nay huong dan test day du cac testcase cho pipeline:
 - Decision engine
 - Action execution
 - Retry va failed flow
+- Auto reply theo sentiment
 - Test comment that tren Facebook Page
 
 ## 2) Pham vi
 
 - WebhookService nhan event Facebook va publish Kafka topic `raw_events`
-- CoreService consume `raw_events`, xu ly pipeline, ghi DB
-- Retry consume topic `send_failed` va republish lai `raw_events`
+- CoreService consume `raw_events`, xu ly pipeline, ghi DB va publish `reply_commands`
+- BackendApi consume `reply_commands`, `send_retry`, kiem tra idempotency va goi Facebook Graph API
+- RetryService consume topic `send_failed`, republish `send_retry`, qua nguong thi publish `dead_letter`
 
 ## 3) Chuan bi moi truong
 
@@ -25,12 +27,23 @@ Kiem tra cac file:
 
 - `WebhookService/appsettings.Development.json`
 - `CoreService/appsettings.Development.json`
+- `BackendApi/appsettings.Development.json`
 
 Can co:
 
-- Facebook `PageId`, `PageAccessToken`, `AppSecret`, `VerifyToken`
+- WebhookService Facebook `PageId`, `AppSecret`, `VerifyToken`
+- BackendApi Facebook `PageId`, `PageAccessToken`
+- BackendApi `Dashboard:AdminApiKey` neu muon bat buoc dashboard gui header `X-Admin-Key`
 - Gemini `ApiKey`
-- Kafka `Topic = raw_events`, `FailedTopic = send_failed`
+- Kafka `Topic = raw_events`, `FailedTopic = send_failed`, `RetryTopic = send_retry`, `DeadLetterTopic = dead_letter`
+
+Tao file `.env` tu `.env.example` neu muon nhan Slack alert:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Sau do thay `YOUR/SLACK/WEBHOOK` bang Incoming Webhook URL that cua Slack.
 
 ### 3.2 Start ha tang
 
@@ -49,13 +62,16 @@ dotnet ef database update --project CoreService\CoreService.csproj
 ```powershell
 dotnet run --project WebhookService\WebhookService.csproj --launch-profile webhook-service
 dotnet run --project CoreService\CoreService.csproj --launch-profile core-service
+dotnet run --project BackendApi\BackendApi.csproj --launch-profile backend-api
+dotnet run --project RetryService\RetryService.csproj --launch-profile retry-service
 ```
 
 Health check:
 
 ```powershell
 Invoke-WebRequest -Uri "http://localhost:3001/health" -UseBasicParsing
-Invoke-WebRequest -Uri "http://localhost:5183/swagger" -UseBasicParsing
+Invoke-WebRequest -Uri "http://localhost:3002/swagger" -UseBasicParsing
+Invoke-WebRequest -Uri "http://localhost:3003/health" -UseBasicParsing
 ```
 
 ## 4) Test local bang script webhook
@@ -93,8 +109,9 @@ Luu y:
 - Expected:
   - `Intent = complaint`
   - `Sentiment = negative`
-  - `ActionTaken = None`
-  - `Status = Processed`
+  - `ActionTaken = ReplyNegative`
+  - BackendApi consume command va cap nhat `Status = Replied`
+  - Facebook co reply xin loi va de nghi ho tro
 
 ### TC03 - Intent praise + positive
 
@@ -102,8 +119,9 @@ Luu y:
 - Expected:
   - `Intent = praise`
   - `Sentiment = positive`
-  - `ActionTaken = None`
-  - `Status = Processed`
+  - `ActionTaken = ReplyPositive`
+  - BackendApi consume command va cap nhat `Status = Replied`
+  - Facebook co reply cam on
 
 ### TC04 - Light spam (link)
 
@@ -136,8 +154,9 @@ Luu y:
   - Trigger action can goi Facebook API (Hide/Block)
 - Expected:
   - Event fail duoc publish `send_failed`
-  - Retry service republish lai `raw_events`
+  - RetryService republish lai `send_retry` sau 1s, 2s, 4s
   - `RetryCount` dung tai `MaxRetryAttempts` (hien tai = 3)
+  - Event qua nguong duoc publish `dead_letter`
 
 ### TC08 - Tai pham nhieu lan -> block flow + manual queue
 
@@ -166,12 +185,17 @@ limit 50;
 select * from "BlacklistedUsers" order by "LastSpamAt" desc limit 20;
 
 select * from "ReviewQueueItems" order by "QueuedAt" desc limit 50;
+
+select "CommandId","EventId","Status","RetryCount","ErrorMessage","UpdatedAt"
+from "CommandExecutions"
+order by "UpdatedAt" desc
+limit 50;
 ```
 
 Map nhanh enum:
 
-- `Status`: `2 = Processed`, `4 = Failed`
-- `ActionTaken`: `0=None`, `1=HideComment`, `2=BlacklistUser`, `3=QueueForReview`, `4=BlockUser`
+- `Status`: `2 = Processed`, `3 = Replied`, `4 = Failed`
+- `ActionTaken`: `0=None`, `1=HideComment`, `2=BlacklistUser`, `3=QueueForReview`, `4=BlockUser`, `5=ReplyPositive`, `6=ReplyNegative`
 
 ## 7) Test comment that tren Facebook Page
 
@@ -221,8 +245,20 @@ PASS khi:
 3. Retry/failed flow hoat dong, retry dung nguong.
 4. Blacklist/review queue duoc ghi dung theo rule.
 5. Test comment that tren page cho ra hanh vi moderation dung voi expectation.
+6. BackendApi log `[IDEMPOTENCY] Duplicate skipped` khi command trung lap.
+7. Message het retry vao `dead_letter`; Prometheus co alert `DeadLetterQueueReceived`.
 
-## 9) Su co thuong gap
+## 9) Monitoring
+
+- Kafka UI: `http://localhost:8080`
+- Kafka exporter metrics: `http://localhost:9308/metrics`
+- Prometheus targets: `http://localhost:9090/targets`
+- Prometheus alerts: `http://localhost:9090/alerts`
+- Alertmanager: `http://localhost:9093`
+
+Khong commit file `.env` vi file nay chua Slack webhook secret.
+
+## 10) Su co thuong gap
 
 - `Facebook API 400 unsupported post request`:
   - Thuong do `comment_id` gia khi test local payload.

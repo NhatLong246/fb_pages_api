@@ -12,20 +12,8 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Services.Configure<FacebookClientOptions>(
-    builder.Configuration.GetSection("Facebook"));
 builder.Services.Configure<RateLimitOptions>(
     builder.Configuration.GetSection("RateLimit"));
-builder.Services.Configure<CircuitBreakerOptions>(
-    builder.Configuration.GetSection("CircuitBreaker"));
-
-builder.Services.AddHttpClient<IFacebookApiClient, FacebookApiClient>(client =>
-{
-    var baseUrl = builder.Configuration["Facebook:BaseUrl"]
-                  ?? "https://graph.facebook.com/v19.0/";
-    if (!baseUrl.EndsWith("/")) baseUrl += "/";
-    client.BaseAddress = new Uri(baseUrl);
-});
 
 builder.Services.AddDbContext<CoreDbContext>(opts =>
     opts.UseNpgsql(builder.Configuration.GetConnectionString("Postgres")));
@@ -43,16 +31,14 @@ builder.Services.AddHttpClient("gemini", c =>
 
 builder.Services.AddSingleton<SpamDetector>();
 builder.Services.AddScoped<RateLimitService>();
-builder.Services.AddSingleton<FacebookApiCircuitBreaker>();
 builder.Services.AddScoped<AiAnalyzer>();
 builder.Services.AddScoped<DecisionEngine>();
 builder.Services.AddScoped<ActionExecutor>();
-builder.Services.AddSingleton<IFailedEventPublisher, FailedEventPublisher>();
+builder.Services.AddSingleton<IFacebookActionCommandPublisher, FacebookActionCommandPublisher>();
 builder.Services.Configure<KafkaConsumerOptions>(
     builder.Configuration.GetSection("Kafka"));
 
 builder.Services.AddHostedService<CoreEventConsumerService>();
-builder.Services.AddHostedService<FailedEventRetryService>();
 
 var app = builder.Build();
 

@@ -1,4 +1,4 @@
-namespace CoreService.Models
+namespace BackendApi.Models
 {
     public class CircuitBreakerOptions
     {

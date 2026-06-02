@@ -1,38 +1,33 @@
 using Confluent.Kafka;
-using CoreService.Data;
-using CoreService.Models;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using RetryService.Models;
 using System.Text.Json;
 
-namespace CoreService.Services
+namespace RetryService.Services
 {
-    public class FailedEventRetryService : BackgroundService
+    public class FailedEventRetryWorker : BackgroundService
     {
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly KafkaConsumerOptions _options;
-        private readonly ILogger<FailedEventRetryService> _logger;
+        private readonly RetryOptions _options;
+        private readonly ILogger<FailedEventRetryWorker> _logger;
 
-        public FailedEventRetryService(
-            IServiceScopeFactory scopeFactory,
-            IOptions<KafkaConsumerOptions> options,
-            ILogger<FailedEventRetryService> logger)
+        public FailedEventRetryWorker(
+            IOptions<RetryOptions> options,
+            ILogger<FailedEventRetryWorker> logger)
         {
-            _scopeFactory = scopeFactory;
             _options = options.Value;
             _logger = logger;
         }
 
-        protected override Task ExecuteAsync(CancellationToken stoppingToken)
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             if (!IsConfigValid())
             {
-                _logger.LogWarning(
-                    "FailedEventRetryService disabled — Kafka config incomplete.");
-                return Task.CompletedTask;
+                _logger.LogWarning("[RETRY] Worker disabled because Kafka config is incomplete.");
+                return;
             }
 
-            return RunLoopAsync(stoppingToken);
+            await Task.Yield();
+            await RunLoopAsync(stoppingToken);
         }
 
         private async Task RunLoopAsync(CancellationToken ct)
@@ -75,7 +70,7 @@ namespace CoreService.Services
                     }
                     catch (ConsumeException ex)
                     {
-                        _logger.LogError(ex, "Kafka retry consume error — continuing.");
+                        _logger.LogError(ex, "[RETRY] Kafka consume error. Continuing.");
                         continue;
                     }
 
@@ -86,7 +81,7 @@ namespace CoreService.Services
             }
             catch (OperationCanceledException)
             {
-                _logger.LogInformation("Failed event retry service stopping.");
+                _logger.LogInformation("[RETRY] Service stopping.");
             }
             finally
             {
@@ -104,70 +99,67 @@ namespace CoreService.Services
             try
             {
                 using var doc = JsonDocument.Parse(result.Message.Value);
-                var originalEvent = doc.RootElement.GetProperty("OriginalEvent");
-                var eventId = originalEvent.GetProperty("EventId").GetString()
+                var originalCommand = doc.RootElement.GetProperty("OriginalCommand");
+                var commandId = originalCommand.GetProperty("CommandId").GetString()
                               ?? result.Message.Key
                               ?? string.Empty;
+                var retryCount = doc.RootElement.GetProperty("RetryCount").GetInt32();
 
-                if (string.IsNullOrWhiteSpace(eventId))
+                if (string.IsNullOrWhiteSpace(commandId))
                 {
                     _logger.LogWarning(
-                        "Skipping failed event without EventId at {Offset}.",
+                        "[RETRY] Skipping failed command without CommandId at {Offset}.",
                         result.TopicPartitionOffset);
                     consumer.Commit(result);
                     return;
                 }
 
-                using var scope = _scopeFactory.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
-                var retryCount = db.EventStates
-                    .AsNoTracking()
-                    .Where(e => e.EventId == eventId)
-                    .Select(e => e.RetryCount)
-                    .FirstOrDefault();
-
-                if (retryCount >= _options.MaxRetryAttempts)
+                if (RetrySchedulePolicy.IsExhausted(retryCount, _options.MaxRetryAttempts))
                 {
-                    await PublishDeadLetterAsync(producer, result.Message.Key, result.Message.Value, eventId, retryCount, ct);
-                    _logger.LogError(
-                        "[DLQ] Retry limit reached. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
-                        eventId,
+                    await PublishDeadLetterAsync(
+                        producer,
+                        result.Message.Key,
+                        result.Message.Value,
+                        commandId,
                         retryCount,
-                        _options.DeadLetterTopic);
+                        ct);
+
                     consumer.Commit(result);
                     return;
                 }
 
-                var delay = TimeSpan.FromSeconds(Math.Pow(2, Math.Max(retryCount - 1, 0)));
+                var delay = TimeSpan.FromSeconds(RetrySchedulePolicy.GetDelaySeconds(retryCount));
                 _logger.LogWarning(
-                    "[RETRY] Scheduled after {DelaySeconds}s. EventId={EventId} RetryCount={RetryCount}",
+                    "[RETRY] Scheduled after {DelaySeconds}s. CommandId={CommandId} RetryCount={RetryCount}",
                     delay.TotalSeconds,
-                    eventId,
+                    commandId,
                     retryCount);
 
                 await Task.Delay(delay, ct);
 
-                var payload = originalEvent.GetRawText();
-                await producer.ProduceAsync(_options.RetryTopic, new Message<string, string>
-                {
-                    Key = eventId,
-                    Value = payload
-                }, ct);
+                await producer.ProduceAsync(
+                    _options.RetryTopic,
+                    new Message<string, string>
+                    {
+                        Key = commandId,
+                        Value = WithIncrementedRetryCount(originalCommand, retryCount + 1)
+                    },
+                    ct);
 
                 producer.Flush(TimeSpan.FromSeconds(5));
                 consumer.Commit(result);
 
                 _logger.LogWarning(
-                    "[RETRY] Republished. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
-                    eventId,
-                    retryCount,
+                    "[RETRY] Republished. CommandId={CommandId} NextRetryCount={RetryCount} Topic={Topic}",
+                    commandId,
+                    retryCount + 1,
                     _options.RetryTopic);
             }
             catch (Exception ex)
             {
                 _logger.LogError(
                     ex,
-                    "Failed to process retry message at {Offset}.",
+                    "[RETRY] Failed to process message at {Offset}.",
                     result.TopicPartitionOffset);
             }
         }
@@ -176,37 +168,48 @@ namespace CoreService.Services
             IProducer<string, string> producer,
             string? key,
             string failedPayload,
-            string eventId,
+            string commandId,
             int retryCount,
             CancellationToken ct)
         {
             var payload = JsonSerializer.Serialize(new
             {
-                EventId = eventId,
+                CommandId = commandId,
                 RetryCount = retryCount,
                 DeadLetteredAt = DateTimeOffset.UtcNow,
                 FailedMessage = JsonSerializer.Deserialize<JsonElement>(failedPayload)
             });
 
-            await producer.ProduceAsync(_options.DeadLetterTopic,
+            await producer.ProduceAsync(
+                _options.DeadLetterTopic,
                 new Message<string, string>
                 {
-                    Key = key ?? eventId,
+                    Key = key ?? commandId,
                     Value = payload
-                }, ct);
+                },
+                ct);
 
             producer.Flush(TimeSpan.FromSeconds(5));
 
             _logger.LogError(
-                "[DLQ] Published. EventId={EventId} RetryCount={RetryCount} Topic={Topic}",
-                eventId,
+                "[DLQ] Published. CommandId={CommandId} RetryCount={RetryCount} Topic={Topic}",
+                commandId,
                 retryCount,
                 _options.DeadLetterTopic);
         }
 
+        private static string WithIncrementedRetryCount(
+            JsonElement command,
+            int retryCount)
+        {
+            var values = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                command.GetRawText()) ?? [];
+            values["RetryCount"] = JsonSerializer.SerializeToElement(retryCount);
+            return JsonSerializer.Serialize(values);
+        }
+
         private bool IsConfigValid() =>
             !string.IsNullOrWhiteSpace(_options.BootstrapServers) &&
-            !string.IsNullOrWhiteSpace(_options.Topic) &&
             !string.IsNullOrWhiteSpace(_options.RetryTopic) &&
             !string.IsNullOrWhiteSpace(_options.FailedTopic) &&
             !string.IsNullOrWhiteSpace(_options.DeadLetterTopic) &&

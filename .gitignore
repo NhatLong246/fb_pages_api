@@ -35,10 +35,17 @@ ehthumbs.db
 **/appsettings.Local.json
 **/appsettings.Production.json
 **/appsettings.*.local.json
+**/appsettings.Secrets.json
+**/secrets.json
 .env
 .env.*
 !.env.example
 secrets.json
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# Local Codex planning artifacts
+docs/superpowers/
 
 # Test and coverage outputs
 TestResults/
